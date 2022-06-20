@@ -180,7 +180,7 @@ func TestNext(t *testing.T) {
 		{"TZ=America/New_York 2012-11-04T00:00:00-0400", "0 0 3 3 * ?", "2012-12-03T03:00:00-0500"},
 
 		// Test the scenario of DST resulting in midnight not being a valid time.
-		// https://github.com/robfig/cron/issues/157
+		// https://github.com/arconomy/cron/issues/157
 		{"2018-10-17T05:00:00-0400", "TZ=America/Sao_Paulo 0 0 9 10 * ?", "2018-11-10T06:00:00-0500"},
 		{"2018-02-14T05:00:00-0500", "TZ=America/Sao_Paulo 0 0 9 22 * ?", "2018-02-22T07:00:00-0500"},
 	}
@@ -290,7 +290,7 @@ func getTimeTZ(value string) time.Time {
 	return t
 }
 
-// https://github.com/robfig/cron/issues/144
+// https://github.com/arconomy/cron/issues/144
 func TestSlash0NoHang(t *testing.T) {
 	schedule := "TZ=America/New_York 15/0 * * * *"
 	_, err := ParseStandard(schedule)

@@ -165,6 +165,7 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
 		WrappedJob: c.chain.Then(cmd),
 		Job:        cmd,
 	}
+	entry.Next = entry.Schedule.Next(c.now())
 	if !c.running {
 		c.entries = append(c.entries, entry)
 	} else {
@@ -352,4 +353,24 @@ func (c *Cron) removeEntry(id EntryID) {
 		}
 	}
 	c.entries = entries
+}
+
+func (c *Cron) EntriesToFire(time time.Time) []*Entry {
+	c.runningMu.Lock()
+	defer c.runningMu.Unlock()
+	var entriesToFire []*Entry
+	for _, e := range c.entries {
+		if e.Next.After(time) || e.Next.IsZero() {
+			continue
+		}
+		entriesToFire = append(entriesToFire, e)
+	}
+	return entriesToFire
+}
+
+func (c *Cron) UpdateNextSchedule(entry *Entry, time time.Time) {
+	c.runningMu.Lock()
+	defer c.runningMu.Unlock()
+	entry.Prev = entry.Next
+	entry.Next = entry.Schedule.Next(time)
 }
