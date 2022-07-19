@@ -11,19 +11,20 @@ import (
 // specified by the schedule. It may be started, stopped, and the entries may
 // be inspected while running.
 type Cron struct {
-	entries   []*Entry
-	chain     Chain
-	stop      chan struct{}
-	add       chan *Entry
-	remove    chan EntryID
-	snapshot  chan chan []Entry
-	running   bool
-	logger    Logger
-	runningMu sync.Mutex
-	location  *time.Location
-	parser    ScheduleParser
-	nextID    EntryID
-	jobWaiter sync.WaitGroup
+	entries    []*Entry
+	chain      Chain
+	stop       chan struct{}
+	add        chan *Entry
+	remove     chan EntryID
+	snapshot   chan chan []Entry
+	running    bool
+	logger     Logger
+	runningMu  sync.Mutex
+	location   *time.Location
+	parser     ScheduleParser
+	nextID     EntryID
+	jobWaiter  sync.WaitGroup
+	customTime *time.Time
 }
 
 // ScheduleParser is an interface for schedule spec parsers that return a Schedule
@@ -112,17 +113,18 @@ func (s byTime) Less(i, j int) bool {
 // See "cron.With*" to modify the default behavior.
 func New(opts ...Option) *Cron {
 	c := &Cron{
-		entries:   nil,
-		chain:     NewChain(),
-		add:       make(chan *Entry),
-		stop:      make(chan struct{}),
-		snapshot:  make(chan chan []Entry),
-		remove:    make(chan EntryID),
-		running:   false,
-		runningMu: sync.Mutex{},
-		logger:    DefaultLogger,
-		location:  time.Local,
-		parser:    standardParser,
+		entries:    nil,
+		chain:      NewChain(),
+		add:        make(chan *Entry),
+		stop:       make(chan struct{}),
+		snapshot:   make(chan chan []Entry),
+		remove:     make(chan EntryID),
+		running:    false,
+		runningMu:  sync.Mutex{},
+		logger:     DefaultLogger,
+		location:   time.Local,
+		parser:     standardParser,
+		customTime: nil,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -316,6 +318,10 @@ func (c *Cron) startJob(j Job) {
 
 // now returns current time in c location
 func (c *Cron) now() time.Time {
+	if c.customTime != nil {
+		tmp := *c.customTime
+		return tmp.In(c.location)
+	}
 	return time.Now().In(c.location)
 }
 
@@ -355,12 +361,12 @@ func (c *Cron) removeEntry(id EntryID) {
 	c.entries = entries
 }
 
-func (c *Cron) EntriesToFire(time time.Time) []*Entry {
+func (c *Cron) EntriesToFire() []*Entry {
 	c.runningMu.Lock()
 	defer c.runningMu.Unlock()
 	var entriesToFire []*Entry
 	for _, e := range c.entries {
-		if e.Next.After(time) || e.Next.IsZero() {
+		if e.Next.After(c.now()) || e.Next.IsZero() {
 			continue
 		}
 		entriesToFire = append(entriesToFire, e)
@@ -368,9 +374,23 @@ func (c *Cron) EntriesToFire(time time.Time) []*Entry {
 	return entriesToFire
 }
 
-func (c *Cron) UpdateNextSchedule(entry *Entry, time time.Time) {
+func (c *Cron) UpdateNextSchedule(entry *Entry) {
 	c.runningMu.Lock()
 	defer c.runningMu.Unlock()
 	entry.Prev = entry.Next
-	entry.Next = entry.Schedule.Next(time)
+	entry.Next = entry.Schedule.Next(c.now())
+}
+
+func (c *Cron) GetCustomTime() *time.Time {
+	return c.customTime
+}
+
+func (c *Cron) SetCustomTime(time time.Time) {
+	c.customTime = &time
+}
+
+func (c *Cron) UpdateAllNextSchedules() {
+	for _, e := range c.entries {
+		e.Next = e.Schedule.Next(c.now())
+	}
 }
