@@ -56,18 +56,17 @@ type Parser struct {
 //
 // Examples
 //
-//  // Standard parser without descriptors
-//  specParser := NewParser(Minute | Hour | Dom | Month | Dow)
-//  sched, err := specParser.Parse("0 0 15 */3 *")
+//	// Standard parser without descriptors
+//	specParser := NewParser(Minute | Hour | Dom | Month | Dow)
+//	sched, err := specParser.Parse("0 0 15 */3 *")
 //
-//  // Same as above, just excludes time fields
-//  specParser := NewParser(Dom | Month | Dow)
-//  sched, err := specParser.Parse("15 */3 *")
+//	// Same as above, just excludes time fields
+//	specParser := NewParser(Dom | Month | Dow)
+//	sched, err := specParser.Parse("15 */3 *")
 //
-//  // Same as above, just makes Dow optional
-//  specParser := NewParser(Dom | Month | DowOptional)
-//  sched, err := specParser.Parse("15 */3")
-//
+//	// Same as above, just makes Dow optional
+//	specParser := NewParser(Dom | Month | DowOptional)
+//	sched, err := specParser.Parse("15 */3")
 func NewParser(options ParseOption) Parser {
 	optionals := 0
 	if options&DowOptional > 0 {
@@ -129,13 +128,20 @@ func (p Parser) Parse(spec string) (Schedule, error) {
 		return bits
 	}
 
+	dowSplit := strings.Split(fields[5], "#")
+	dowHash := "*"
+	if len(dowSplit) == 2 {
+		dowHash = dowSplit[1]
+	}
+
 	var (
 		second     = field(fields[0], seconds)
 		minute     = field(fields[1], minutes)
 		hour       = field(fields[2], hours)
 		dayofmonth = field(fields[3], dom)
 		month      = field(fields[4], months)
-		dayofweek  = field(fields[5], dow)
+		dayofweek  = field(dowSplit[0], dow)
+		week       = field(dowHash, weeks)
 	)
 	if err != nil {
 		return nil, err
@@ -148,6 +154,7 @@ func (p Parser) Parse(spec string) (Schedule, error) {
 		Dom:      dayofmonth,
 		Month:    month,
 		Dow:      dayofweek,
+		Week:     week,
 		Location: loc,
 	}, nil
 }
@@ -247,7 +254,9 @@ func getField(field string, r bounds) (uint64, error) {
 }
 
 // getRange returns the bits indicated by the given expression:
-//   number | number "-" number [ "/" number ]
+//
+//	number | number "-" number [ "/" number ]
+//
 // or error parsing range.
 func getRange(expr string, r bounds) (uint64, error) {
 	var (
@@ -372,6 +381,7 @@ func parseDescriptor(descriptor string, loc *time.Location) (Schedule, error) {
 			Dom:      1 << dom.min,
 			Month:    1 << months.min,
 			Dow:      all(dow),
+			Week:     all(weeks),
 			Location: loc,
 		}, nil
 
@@ -383,6 +393,7 @@ func parseDescriptor(descriptor string, loc *time.Location) (Schedule, error) {
 			Dom:      1 << dom.min,
 			Month:    all(months),
 			Dow:      all(dow),
+			Week:     all(weeks),
 			Location: loc,
 		}, nil
 
@@ -394,6 +405,7 @@ func parseDescriptor(descriptor string, loc *time.Location) (Schedule, error) {
 			Dom:      all(dom),
 			Month:    all(months),
 			Dow:      1 << dow.min,
+			Week:     all(weeks),
 			Location: loc,
 		}, nil
 
@@ -405,6 +417,7 @@ func parseDescriptor(descriptor string, loc *time.Location) (Schedule, error) {
 			Dom:      all(dom),
 			Month:    all(months),
 			Dow:      all(dow),
+			Week:     all(weeks),
 			Location: loc,
 		}, nil
 
@@ -416,6 +429,7 @@ func parseDescriptor(descriptor string, loc *time.Location) (Schedule, error) {
 			Dom:      all(dom),
 			Month:    all(months),
 			Dow:      all(dow),
+			Week:     all(weeks),
 			Location: loc,
 		}, nil
 

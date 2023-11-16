@@ -5,7 +5,7 @@ import "time"
 // SpecSchedule specifies a duty cycle (to the second granularity), based on a
 // traditional crontab specification. It is computed initially and stored as bit sets.
 type SpecSchedule struct {
-	Second, Minute, Hour, Dom, Month, Dow uint64
+	Second, Minute, Hour, Dom, Month, Dow, Week uint64
 
 	// Override location for this schedule.
 	Location *time.Location
@@ -46,6 +46,7 @@ var (
 		"fri": 5,
 		"sat": 6,
 	}}
+	weeks = bounds{1, 5, nil}
 )
 
 const (
@@ -182,7 +183,32 @@ func dayMatches(s *SpecSchedule, t time.Time) bool {
 		dowMatch bool = 1<<uint(t.Weekday())&s.Dow > 0
 	)
 	if s.Dom&starBit > 0 || s.Dow&starBit > 0 {
-		return domMatch && dowMatch
+		if domMatch && dowMatch {
+			return weekMatches(s, t)
+		}
+		return false
 	}
-	return domMatch || dowMatch
+	return domMatch || (dowMatch && weekMatches(s, t))
+}
+
+// weekMatches returns true if the week specified matches the given time
+func weekMatches(s *SpecSchedule, t time.Time) bool {
+	// check for week
+	if s.Week&starBit > 0 {
+		return true
+	}
+	day := t.Day()
+	week := 0
+	if day >= 1 && day <= 7 {
+		week = 1
+	} else if day >= 8 && day <= 14 {
+		week = 2
+	} else if day >= 15 && day <= 21 {
+		week = 3
+	} else if day >= 22 && day <= 28 {
+		week = 4
+	} else {
+		week = 5
+	}
+	return 1<<uint(week)&s.Week > 0
 }
