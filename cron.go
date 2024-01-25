@@ -366,8 +366,18 @@ func (c *Cron) EntriesToFire() []*Entry {
 	defer c.runningMu.Unlock()
 	var entriesToFire []*Entry
 	for _, e := range c.entries {
-		if e.Next.After(c.now()) || e.Next.IsZero() {
-			continue
+		// when a custom time is not provided (ie. we actually use the cron scheduler), the next time is set before
+		// the callback is run. That means to actually get the entries to fire, we need to use e.Prev.
+		// This is different to when the custom time is provided as we don't know what needs to fire yet, in which
+		// case we need to use the next time, and then manually update the next time.
+		if c.customTime == nil {
+			if e.Prev.After(c.now()) || e.Prev.IsZero() {
+				continue
+			}
+		} else {
+			if e.Next.After(c.now()) || e.Next.IsZero() {
+				continue
+			}
 		}
 		entriesToFire = append(entriesToFire, e)
 	}
