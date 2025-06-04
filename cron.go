@@ -11,20 +11,21 @@ import (
 // specified by the schedule. It may be started, stopped, and the entries may
 // be inspected while running.
 type Cron struct {
-	entries    []*Entry
-	chain      Chain
-	stop       chan struct{}
-	add        chan *Entry
-	remove     chan EntryID
-	snapshot   chan chan []Entry
-	running    bool
-	logger     Logger
-	runningMu  sync.Mutex
-	location   *time.Location
-	parser     ScheduleParser
-	nextID     EntryID
-	jobWaiter  sync.WaitGroup
-	customTime *time.Time
+	entries          []*Entry
+	chain            Chain
+	stop             chan struct{}
+	add              chan *Entry
+	remove           chan EntryID
+	snapshot         chan chan []Entry
+	running          bool
+	logger           Logger
+	runningMu        sync.Mutex
+	location         *time.Location
+	parser           ScheduleParser
+	nextID           EntryID
+	jobWaiter        sync.WaitGroup
+	customTime       *time.Time
+	manualUpdateNext bool
 }
 
 // ScheduleParser is an interface for schedule spec parsers that return a Schedule
@@ -113,18 +114,19 @@ func (s byTime) Less(i, j int) bool {
 // See "cron.With*" to modify the default behavior.
 func New(opts ...Option) *Cron {
 	c := &Cron{
-		entries:    nil,
-		chain:      NewChain(),
-		add:        make(chan *Entry),
-		stop:       make(chan struct{}),
-		snapshot:   make(chan chan []Entry),
-		remove:     make(chan EntryID),
-		running:    false,
-		runningMu:  sync.Mutex{},
-		logger:     DefaultLogger,
-		location:   time.Local,
-		parser:     standardParser,
-		customTime: nil,
+		entries:          nil,
+		chain:            NewChain(),
+		add:              make(chan *Entry),
+		stop:             make(chan struct{}),
+		snapshot:         make(chan chan []Entry),
+		remove:           make(chan EntryID),
+		running:          false,
+		runningMu:        sync.Mutex{},
+		logger:           DefaultLogger,
+		location:         time.Local,
+		parser:           standardParser,
+		customTime:       nil,
+		manualUpdateNext: false,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -274,8 +276,10 @@ func (c *Cron) run() {
 						break
 					}
 					c.startJob(e.WrappedJob)
-					e.Prev = e.Next
-					e.Next = e.Schedule.Next(now)
+					if !c.manualUpdateNext {
+						e.Prev = e.Next
+						e.Next = e.Schedule.Next(now)
+					}
 					c.logger.Info("run", "now", now, "entry", e.ID, "next", e.Next)
 				}
 
@@ -366,18 +370,9 @@ func (c *Cron) EntriesToFire() []*Entry {
 	defer c.runningMu.Unlock()
 	var entriesToFire []*Entry
 	for _, e := range c.entries {
-		// when a custom time is not provided (ie. we actually use the cron scheduler), the next time is set before
-		// the callback is run. That means to actually get the entries to fire, we need to use e.Prev.
-		// This is different to when the custom time is provided as we don't know what needs to fire yet, in which
-		// case we need to use the next time, and then manually update the next time.
-		if c.customTime == nil {
-			if e.Prev.After(c.now()) || e.Prev.IsZero() {
-				continue
-			}
-		} else {
-			if e.Next.After(c.now()) || e.Next.IsZero() {
-				continue
-			}
+		now := c.now()
+		if e.Next.After(now) {
+			continue
 		}
 		entriesToFire = append(entriesToFire, e)
 	}

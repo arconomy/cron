@@ -43,3 +43,9 @@ func WithLogger(logger Logger) Option {
 		c.logger = logger
 	}
 }
+
+func WithManualUpdateNext() Option {
+	return func(c *Cron) {
+		c.manualUpdateNext = true
+	}
+}
