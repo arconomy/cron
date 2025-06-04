@@ -371,7 +371,7 @@ func (c *Cron) EntriesToFire() []*Entry {
 	var entriesToFire []*Entry
 	for _, e := range c.entries {
 		now := c.now()
-		if e.Next.After(now) {
+		if e.Next.After(now) || e.Next.IsZero() {
 			continue
 		}
 		entriesToFire = append(entriesToFire, e)
