@@ -5,6 +5,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 // Cron keeps track of any number of entries, invoking the associated func as
@@ -18,8 +20,7 @@ type Cron struct {
 	remove           chan EntryID
 	snapshot         chan chan []Entry
 	running          bool
-	logger           Logger
-	runningMu        sync.Mutex
+	runningMu        sync.RWMutex
 	location         *time.Location
 	parser           ScheduleParser
 	nextID           EntryID
@@ -121,8 +122,7 @@ func New(opts ...Option) *Cron {
 		snapshot:         make(chan chan []Entry),
 		remove:           make(chan EntryID),
 		running:          false,
-		runningMu:        sync.Mutex{},
-		logger:           DefaultLogger,
+		runningMu:        sync.RWMutex{},
 		location:         time.Local,
 		parser:           standardParser,
 		customTime:       nil,
@@ -180,8 +180,8 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
 
 // Entries returns a snapshot of the cron entries.
 func (c *Cron) Entries() []Entry {
-	c.runningMu.Lock()
-	defer c.runningMu.Unlock()
+	c.runningMu.RLock()
+	defer c.runningMu.RUnlock()
 	if c.running {
 		replyChan := make(chan []Entry, 1)
 		c.snapshot <- replyChan
@@ -242,13 +242,13 @@ func (c *Cron) Run() {
 // run the scheduler.. this is private just due to the need to synchronize
 // access to the 'running' state variable.
 func (c *Cron) run() {
-	c.logger.Info("start")
+	log.Info().Msg("cron - start")
 
 	// Figure out the next activation times for each entry.
 	now := c.now()
 	for _, entry := range c.entries {
 		entry.Next = entry.Schedule.Next(now)
-		c.logger.Info("schedule", "now", now, "entry", entry.ID, "next", entry.Next)
+		log.Info().Time("now", now).Int64("entry", int64(entry.ID)).Time("next", entry.Next).Msg("cron - schedule")
 	}
 
 	for {
@@ -268,7 +268,7 @@ func (c *Cron) run() {
 			select {
 			case now = <-timer.C:
 				now = now.In(c.location)
-				c.logger.Info("wake", "now", now)
+				log.Info().Time("now", now).Msg("cron - wake")
 
 				// Run every entry whose next time was less than now
 				for _, e := range c.entries {
@@ -280,7 +280,7 @@ func (c *Cron) run() {
 						e.Prev = e.Next
 						e.Next = e.Schedule.Next(now)
 					}
-					c.logger.Info("run", "now", now, "entry", e.ID, "next", e.Next)
+					log.Info().Time("now", now).Int64("entry", int64(e.ID)).Time("next", e.Next).Msg("cron - run")
 				}
 
 			case newEntry := <-c.add:
@@ -288,7 +288,7 @@ func (c *Cron) run() {
 				now = c.now()
 				newEntry.Next = newEntry.Schedule.Next(now)
 				c.entries = append(c.entries, newEntry)
-				c.logger.Info("added", "now", now, "entry", newEntry.ID, "next", newEntry.Next)
+				log.Info().Time("now", now).Int64("entry", int64(newEntry.ID)).Time("next", newEntry.Next).Msg("cron - added")
 
 			case replyChan := <-c.snapshot:
 				replyChan <- c.entrySnapshot()
@@ -296,14 +296,14 @@ func (c *Cron) run() {
 
 			case <-c.stop:
 				timer.Stop()
-				c.logger.Info("stop")
+				log.Info().Msg("cron - stop")
 				return
 
 			case id := <-c.remove:
 				timer.Stop()
 				now = c.now()
 				c.removeEntry(id)
-				c.logger.Info("removed", "entry", id)
+				log.Info().Int64("entry", int64(id)).Msg("cron - removed")
 			}
 
 			break
@@ -366,8 +366,9 @@ func (c *Cron) removeEntry(id EntryID) {
 }
 
 func (c *Cron) EntriesToFire() []*Entry {
-	c.runningMu.Lock()
-	defer c.runningMu.Unlock()
+	log.Info().Msg("cron - entriesToFire - start")
+	c.runningMu.RLock()
+	defer c.runningMu.RUnlock()
 	var entriesToFire []*Entry
 	for _, e := range c.entries {
 		now := c.now()
@@ -376,10 +377,12 @@ func (c *Cron) EntriesToFire() []*Entry {
 		}
 		entriesToFire = append(entriesToFire, e)
 	}
+	log.Info().Interface("entriesToFire", entriesToFire).Msg("cron - entriesToFire - end")
 	return entriesToFire
 }
 
 func (c *Cron) UpdateNextSchedule(entry *Entry) {
+	log.Info().Msg("cron - update next schedule")
 	c.runningMu.Lock()
 	defer c.runningMu.Unlock()
 	entry.Prev = entry.Next
@@ -395,6 +398,9 @@ func (c *Cron) SetCustomTime(time time.Time) {
 }
 
 func (c *Cron) UpdateAllNextSchedules() {
+	log.Info().Msg("cron - update all next schedules")
+	c.runningMu.Lock()
+	defer c.runningMu.Unlock()
 	for _, e := range c.entries {
 		e.Next = e.Schedule.Next(c.now())
 	}
