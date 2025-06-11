@@ -37,13 +37,6 @@ func WithChain(wrappers ...JobWrapper) Option {
 	}
 }
 
-// WithLogger uses the provided logger.
-func WithLogger(logger Logger) Option {
-	return func(c *Cron) {
-		c.logger = logger
-	}
-}
-
 func WithManualUpdateNext() Option {
 	return func(c *Cron) {
 		c.manualUpdateNext = true
