@@ -27,6 +27,8 @@ type Cron struct {
 	jobWaiter        sync.WaitGroup
 	customTime       *time.Time
 	manualUpdateNext bool
+	lastActivityTime time.Time
+	activityMu       sync.RWMutex
 }
 
 // ScheduleParser is an interface for schedule spec parsers that return a Schedule
@@ -72,6 +74,10 @@ type Entry struct {
 	// It is kept around so that user code that needs to get at the job later,
 	// e.g. via Entries() can do so.
 	Job Job
+
+	// if the entry is set to a specific time and the entry has triggered and does not require to be triggered anymore, then
+	// this is set to true
+	Completed bool
 }
 
 // Valid returns true if this is not the zero entry.
@@ -87,10 +93,10 @@ func (s byTime) Less(i, j int) bool {
 	// Two zero times should return false.
 	// Otherwise, zero is "greater" than any other time.
 	// (To sort it at the end of the list.)
-	if s[i].Next.IsZero() {
+	if s[i].Next.IsZero() || s[i].Completed {
 		return false
 	}
-	if s[j].Next.IsZero() {
+	if s[j].Next.IsZero() || s[j].Completed {
 		return true
 	}
 	return s[i].Next.Before(s[j].Next)
@@ -244,6 +250,17 @@ func (c *Cron) Run() {
 func (c *Cron) run() {
 	log.Info().Msg("cron - start")
 
+	// Start health check ticker that triggers every 10 seconds
+	heartbeat := c.startHeartbeat()
+	defer close(heartbeat)
+
+	// Update last activity time whenever the timer fires
+	updateActivity := func() {
+		c.activityMu.Lock()
+		defer c.activityMu.Unlock()
+		c.lastActivityTime = time.Now()
+	}
+
 	// Figure out the next activation times for each entry.
 	now := c.now()
 	for _, entry := range c.entries {
@@ -265,8 +282,10 @@ func (c *Cron) run() {
 		}
 
 		for {
+			now = c.now()
 			select {
 			case now = <-timer.C:
+				updateActivity()
 				now = now.In(c.location)
 				log.Info().Time("now", now).Msg("cron - wake")
 
@@ -279,6 +298,9 @@ func (c *Cron) run() {
 					if !c.manualUpdateNext {
 						e.Prev = e.Next
 						e.Next = e.Schedule.Next(now)
+						if e.Next.Before(now) {
+							e.Completed = true
+						}
 					}
 					log.Info().Time("now", now).Int64("entry", int64(e.ID)).Time("next", e.Next).Msg("cron - run")
 				}
@@ -289,6 +311,30 @@ func (c *Cron) run() {
 				newEntry.Next = newEntry.Schedule.Next(now)
 				c.entries = append(c.entries, newEntry)
 				log.Info().Time("now", now).Int64("entry", int64(newEntry.ID)).Time("next", newEntry.Next).Msg("cron - added")
+
+			case heartbeatTime := <-heartbeat:
+				c.activityMu.RLock()
+				timeSinceLastActivity := heartbeatTime.Sub(c.lastActivityTime)
+				c.activityMu.RUnlock()
+
+				if timeSinceLastActivity > 10*time.Second {
+					// check if there are any entries that should have fired but didn't
+					for _, e := range c.entries {
+						if e.Next.Before(now) && !e.Completed {
+							now = c.now().In(c.location)
+							log.Error().Interface("entry", e).Time("now", now).Time("next", e.Next).Msg("cron - entry should have fired but didn't")
+							c.startJob(e.WrappedJob)
+							if !c.manualUpdateNext {
+								e.Prev = e.Next
+								e.Next = e.Schedule.Next(now)
+								if e.Next.Before(now) {
+									e.Completed = true
+								}
+							}
+							break
+						}
+					}
+				}
 
 			case replyChan := <-c.snapshot:
 				replyChan <- c.entrySnapshot()
@@ -309,6 +355,48 @@ func (c *Cron) run() {
 			break
 		}
 	}
+}
+
+// startHeartbeat is a ticker that fires at 2, 12, 22, 32, 42, 52 seconds
+// the offset is so that the normal timer has time to fire first.
+func (c *Cron) startHeartbeat() chan time.Time {
+	ch := make(chan time.Time)
+	go func() {
+		for {
+			now := c.now()
+			// Calculate duration until next target second
+			sec := now.Second()
+			var nextTick time.Duration
+
+			// Find the next target second in this minute
+			switch {
+			case sec < 2:
+				nextTick = 2 - time.Duration(sec)
+			case sec < 12:
+				nextTick = 12 - time.Duration(sec)
+			case sec < 22:
+				nextTick = 22 - time.Duration(sec)
+			case sec < 32:
+				nextTick = 32 - time.Duration(sec)
+			case sec < 42:
+				nextTick = 42 - time.Duration(sec)
+			case sec < 52:
+				nextTick = 52 - time.Duration(sec)
+			default: // 52-59 seconds
+				nextTick = 62 - time.Duration(sec) // Next minute's first tick
+			}
+
+			// Wait until the next target second
+			time.Sleep(time.Duration(nextTick) * time.Second)
+
+			// Execute your task here
+			ch <- now
+
+			// Add a small delay to prevent tight loop if the task completes quickly
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+	return ch
 }
 
 // startJob runs the given job in a new goroutine.
@@ -387,6 +475,9 @@ func (c *Cron) UpdateNextSchedule(entry *Entry) {
 	defer c.runningMu.Unlock()
 	entry.Prev = entry.Next
 	entry.Next = entry.Schedule.Next(entry.Prev)
+	if entry.Next.Before(c.now()) {
+		entry.Completed = true
+	}
 }
 
 func (c *Cron) GetCustomTime() *time.Time {
@@ -403,5 +494,8 @@ func (c *Cron) UpdateAllNextSchedules() {
 	defer c.runningMu.Unlock()
 	for _, e := range c.entries {
 		e.Next = e.Schedule.Next(c.now())
+		if e.Next.Before(c.now()) {
+			e.Completed = true
+		}
 	}
 }
