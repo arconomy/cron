@@ -286,6 +286,7 @@ func (c *Cron) run() {
 					continue
 				}
 				timer = time.NewTimer(entry.Next.Sub(now))
+				break
 			}
 			if timer == nil {
 				time.Sleep(200 * time.Millisecond)
