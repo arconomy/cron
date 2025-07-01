@@ -78,6 +78,9 @@ type Entry struct {
 	// if the entry is set to a specific time and the entry has triggered and does not require to be triggered anymore, then
 	// this is set to true
 	Completed bool
+
+	// Is waiting for a manual update on the next time
+	WaitForManualUpdateNext bool
 }
 
 // Valid returns true if this is not the zero entry.
@@ -278,7 +281,16 @@ func (c *Cron) run() {
 			// and stop requests.
 			timer = time.NewTimer(100000 * time.Hour)
 		} else {
-			timer = time.NewTimer(c.entries[0].Next.Sub(now))
+			for _, entry := range c.entries {
+				if entry.WaitForManualUpdateNext {
+					continue
+				}
+				timer = time.NewTimer(entry.Next.Sub(now))
+			}
+			if timer == nil {
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
 		}
 
 		for {
@@ -301,6 +313,8 @@ func (c *Cron) run() {
 						if e.Next.Before(now) {
 							e.Completed = true
 						}
+					} else {
+						e.WaitForManualUpdateNext = true
 					}
 					log.Info().Time("now", now).Int64("entry", int64(e.ID)).Time("next", e.Next).Msg("cron - run")
 				}
@@ -478,6 +492,7 @@ func (c *Cron) UpdateNextSchedule(entry *Entry) {
 	if entry.Next.Before(c.now()) {
 		entry.Completed = true
 	}
+	entry.WaitForManualUpdateNext = false
 }
 
 func (c *Cron) GetCustomTime() *time.Time {
@@ -497,5 +512,6 @@ func (c *Cron) UpdateAllNextSchedules() {
 		if e.Next.Before(c.now()) {
 			e.Completed = true
 		}
+		e.WaitForManualUpdateNext = false
 	}
 }
