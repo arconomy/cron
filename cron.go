@@ -284,6 +284,7 @@ func (c *Cron) run() {
 				if entry.WaitForManualUpdateNext {
 					continue
 				}
+				now := c.now()
 				timer = time.NewTimer(entry.Next.Sub(now))
 				break
 			}
