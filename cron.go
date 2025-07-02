@@ -254,7 +254,7 @@ func (c *Cron) run() {
 	log.Info().Msg("cron - start")
 
 	// Start health check ticker that triggers every 10 seconds
-	c.startHeartbeat()
+	heartbeatChannel := c.startHeartbeat()
 
 	// Update last activity time whenever the timer fires
 	updateActivity := func() {
@@ -339,6 +339,10 @@ func (c *Cron) run() {
 				now = c.now()
 				c.removeEntry(id)
 				log.Info().Int64("entry", int64(id)).Msg("cron - removed")
+
+			case <-heartbeatChannel:
+				// we need to trigger this so a new timer is created
+				timer.Stop()
 			}
 
 			break
@@ -348,7 +352,8 @@ func (c *Cron) run() {
 
 // startHeartbeat is a ticker that fires at 2, 12, 22, 32, 42, 52 seconds
 // the offset is so that the normal timer has time to fire first.
-func (c *Cron) startHeartbeat() {
+func (c *Cron) startHeartbeat() chan bool {
+	heartbeatChannel := make(chan bool)
 	go func() {
 		for {
 			if !c.running {
@@ -413,8 +418,10 @@ func (c *Cron) startHeartbeat() {
 
 			// Add a small delay to prevent tight loop if the task completes quickly
 			time.Sleep(100 * time.Millisecond)
+			heartbeatChannel <- true
 		}
 	}()
+	return heartbeatChannel
 }
 
 // startJob runs the given job in a new goroutine.
