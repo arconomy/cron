@@ -254,8 +254,7 @@ func (c *Cron) run() {
 	log.Info().Msg("cron - start")
 
 	// Start health check ticker that triggers every 10 seconds
-	heartbeat := c.startHeartbeat()
-	defer close(heartbeat)
+	c.startHeartbeat()
 
 	// Update last activity time whenever the timer fires
 	updateActivity := func() {
@@ -295,7 +294,6 @@ func (c *Cron) run() {
 		}
 
 		for {
-			now = c.now()
 			select {
 			case now = <-timer.C:
 				updateActivity()
@@ -327,30 +325,6 @@ func (c *Cron) run() {
 				c.entries = append(c.entries, newEntry)
 				log.Info().Time("now", now).Int64("entry", int64(newEntry.ID)).Time("next", newEntry.Next).Msg("cron - added")
 
-			case heartbeatTime := <-heartbeat:
-				c.activityMu.RLock()
-				timeSinceLastActivity := heartbeatTime.Sub(c.lastActivityTime)
-				c.activityMu.RUnlock()
-
-				if timeSinceLastActivity > 10*time.Second {
-					// check if there are any entries that should have fired but didn't
-					for _, e := range c.entries {
-						if e.Next.Before(now) && !e.Completed {
-							now = c.now().In(c.location)
-							log.Error().Interface("entry", e).Time("now", now).Time("next", e.Next).Msg("cron - entry should have fired but didn't")
-							c.startJob(e.WrappedJob)
-							if !c.manualUpdateNext {
-								e.Prev = e.Next
-								e.Next = e.Schedule.Next(now)
-								if e.Next.Before(now) {
-									e.Completed = true
-								}
-							}
-							break
-						}
-					}
-				}
-
 			case replyChan := <-c.snapshot:
 				replyChan <- c.entrySnapshot()
 				continue
@@ -374,10 +348,12 @@ func (c *Cron) run() {
 
 // startHeartbeat is a ticker that fires at 2, 12, 22, 32, 42, 52 seconds
 // the offset is so that the normal timer has time to fire first.
-func (c *Cron) startHeartbeat() chan time.Time {
-	ch := make(chan time.Time)
+func (c *Cron) startHeartbeat() {
 	go func() {
 		for {
+			if !c.running {
+				break
+			}
 			now := c.now()
 			// Calculate duration until next target second
 			sec := now.Second()
@@ -385,33 +361,60 @@ func (c *Cron) startHeartbeat() chan time.Time {
 
 			// Find the next target second in this minute
 			switch {
-			case sec < 2:
-				nextTick = 2 - time.Duration(sec)
-			case sec < 12:
-				nextTick = 12 - time.Duration(sec)
-			case sec < 22:
-				nextTick = 22 - time.Duration(sec)
-			case sec < 32:
-				nextTick = 32 - time.Duration(sec)
-			case sec < 42:
-				nextTick = 42 - time.Duration(sec)
-			case sec < 52:
-				nextTick = 52 - time.Duration(sec)
+			case sec < 5:
+				nextTick = 5 - time.Duration(sec)
+			case sec < 15:
+				nextTick = 15 - time.Duration(sec)
+			case sec < 25:
+				nextTick = 25 - time.Duration(sec)
+			case sec < 35:
+				nextTick = 35 - time.Duration(sec)
+			case sec < 45:
+				nextTick = 45 - time.Duration(sec)
+			case sec < 55:
+				nextTick = 55 - time.Duration(sec)
 			default: // 52-59 seconds
-				nextTick = 62 - time.Duration(sec) // Next minute's first tick
+				nextTick = 65 - time.Duration(sec) // Next minute's first tick
 			}
 
 			// Wait until the next target second
 			time.Sleep(time.Duration(nextTick) * time.Second)
 
 			// Execute your task here
-			ch <- now
+			c.activityMu.RLock()
+			now = c.now()
+			timeSinceLastActivity := now.Sub(c.lastActivityTime)
+			c.activityMu.RUnlock()
+
+			if !c.running {
+				break
+			}
+
+			if timeSinceLastActivity > 10*time.Second {
+				// check if there are any entries that should have fired but didn't
+				for _, e := range c.entries {
+					if e.Next.Before(now) && !e.Completed {
+						now = c.now().In(c.location)
+						log.Error().Interface("entry", e).Time("now", now).Time("next", e.Next).Msg("cron - entry should have fired but didn't")
+						c.startJob(e.WrappedJob)
+						if !c.manualUpdateNext {
+							e.Prev = e.Next
+							e.Next = e.Schedule.Next(now)
+							if e.Next.Before(now) {
+								e.Completed = true
+							}
+						} else {
+							e.WaitForManualUpdateNext = true
+						}
+						break
+					}
+				}
+			}
 
 			// Add a small delay to prevent tight loop if the task completes quickly
 			time.Sleep(100 * time.Millisecond)
 		}
 	}()
-	return ch
 }
 
 // startJob runs the given job in a new goroutine.
