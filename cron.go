@@ -29,6 +29,7 @@ type Cron struct {
 	manualUpdateNext bool
 	lastActivityTime time.Time
 	activityMu       sync.RWMutex
+	entriesMu        sync.RWMutex
 }
 
 // ScheduleParser is an interface for schedule spec parsers that return a Schedule
@@ -132,6 +133,8 @@ func New(opts ...Option) *Cron {
 		remove:           make(chan EntryID),
 		running:          false,
 		runningMu:        sync.RWMutex{},
+		activityMu:       sync.RWMutex{},
+		entriesMu:        sync.RWMutex{},
 		location:         time.Local,
 		parser:           standardParser,
 		customTime:       nil,
@@ -180,7 +183,9 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
 	}
 	entry.Next = entry.Schedule.Next(c.now())
 	if !c.running {
+		c.entriesMu.Lock()
 		c.entries = append(c.entries, entry)
+		c.entriesMu.Unlock()
 	} else {
 		c.add <- entry
 	}
@@ -248,6 +253,23 @@ func (c *Cron) Run() {
 	c.run()
 }
 
+// stopTimer safely stops and drains the timer channel
+func stopTimer(t *time.Timer) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+}
+
+// Update last activity time whenever the timer fires
+func (c *Cron) updateActivity() {
+		c.activityMu.Lock()
+		defer c.activityMu.Unlock()
+		c.lastActivityTime = time.Now()
+	}
+
 // run the scheduler.. this is private just due to the need to synchronize
 // access to the 'running' state variable.
 func (c *Cron) run() {
@@ -256,22 +278,18 @@ func (c *Cron) run() {
 	// Start health check ticker that triggers every 10 seconds
 	heartbeatChannel := c.startHeartbeat()
 
-	// Update last activity time whenever the timer fires
-	updateActivity := func() {
-		c.activityMu.Lock()
-		defer c.activityMu.Unlock()
-		c.lastActivityTime = time.Now()
-	}
-
 	// Figure out the next activation times for each entry.
 	now := c.now()
+	c.entriesMu.RLock()
 	for _, entry := range c.entries {
 		entry.Next = entry.Schedule.Next(now)
 		log.Info().Time("now", now).Int64("entry", int64(entry.ID)).Time("next", entry.Next).Msg("cron - schedule")
 	}
+	c.entriesMu.RUnlock()
 
 	for {
 		// Determine the next entry to run.
+		c.entriesMu.Lock()
 		sort.Sort(byTime(c.entries))
 
 		var timer *time.Timer
@@ -290,18 +308,21 @@ func (c *Cron) run() {
 			}
 			if timer == nil {
 				time.Sleep(200 * time.Millisecond)
+				c.entriesMu.Unlock()
 				continue
 			}
 		}
+		c.entriesMu.Unlock()
 
 		for {
 			select {
 			case now = <-timer.C:
-				updateActivity()
+				c.updateActivity()
 				now = now.In(c.location)
 				log.Info().Time("now", now).Msg("cron - wake")
 
 				// Run every entry whose next time was less than now
+				c.entriesMu.Lock()
 				for _, e := range c.entries {
 					if e.Next.After(now) || e.Next.IsZero() {
 						break
@@ -318,12 +339,15 @@ func (c *Cron) run() {
 					}
 					log.Info().Time("now", now).Int64("entry", int64(e.ID)).Time("next", e.Next).Msg("cron - run")
 				}
+				c.entriesMu.Unlock()
 
 			case newEntry := <-c.add:
-				timer.Stop()
+				stopTimer(timer)
 				now = c.now()
 				newEntry.Next = newEntry.Schedule.Next(now)
+				c.entriesMu.Lock()
 				c.entries = append(c.entries, newEntry)
+				c.entriesMu.Unlock()
 				log.Info().Time("now", now).Int64("entry", int64(newEntry.ID)).Time("next", newEntry.Next).Msg("cron - added")
 
 			case replyChan := <-c.snapshot:
@@ -331,19 +355,19 @@ func (c *Cron) run() {
 				continue
 
 			case <-c.stop:
-				timer.Stop()
+				stopTimer(timer)
 				log.Info().Msg("cron - stop")
 				return
 
 			case id := <-c.remove:
-				timer.Stop()
+				stopTimer(timer)
 				now = c.now()
 				c.removeEntry(id)
 				log.Info().Int64("entry", int64(id)).Msg("cron - removed")
 
 			case <-heartbeatChannel:
 				// we need to trigger this so a new timer is created
-				timer.Stop()
+				stopTimer(timer)
 			}
 
 			break
@@ -398,11 +422,13 @@ func (c *Cron) startHeartbeat() chan bool {
 
 			if timeSinceLastActivity > 10*time.Second {
 				// check if there are any entries that should have fired but didn't
+				c.entriesMu.RLock()
 				for _, e := range c.entries {
 					if e.Next.Before(now) && !e.Completed {
 						now = c.now().In(c.location)
 						log.Error().Interface("entry", e).Time("now", now).Time("next", e.Next).Msg("cron - entry should have fired but didn't")
 						c.startJob(e.WrappedJob)
+						c.updateActivity()
 						if !c.manualUpdateNext {
 							e.Prev = e.Next
 							e.Next = e.Schedule.Next(now)
@@ -412,14 +438,18 @@ func (c *Cron) startHeartbeat() chan bool {
 						} else {
 							e.WaitForManualUpdateNext = true
 						}
-						break
 					}
 				}
+				c.entriesMu.RUnlock()
 			}
 
 			// Add a small delay to prevent tight loop if the task completes quickly
 			time.Sleep(100 * time.Millisecond)
-			heartbeatChannel <- true
+			select {
+			case heartbeatChannel <- true:
+			default:
+				// If the main loop is busy, don't block the heartbeat
+			}
 		}
 	}()
 	return heartbeatChannel
@@ -462,6 +492,8 @@ func (c *Cron) Stop() context.Context {
 
 // entrySnapshot returns a copy of the current cron entry list.
 func (c *Cron) entrySnapshot() []Entry {
+	c.entriesMu.RLock()
+	defer c.entriesMu.RUnlock()
 	var entries = make([]Entry, len(c.entries))
 	for i, e := range c.entries {
 		entries[i] = *e
@@ -470,6 +502,8 @@ func (c *Cron) entrySnapshot() []Entry {
 }
 
 func (c *Cron) removeEntry(id EntryID) {
+	c.entriesMu.Lock()
+	defer c.entriesMu.Unlock()
 	var entries []*Entry
 	for _, e := range c.entries {
 		if e.ID != id {
@@ -481,8 +515,8 @@ func (c *Cron) removeEntry(id EntryID) {
 
 func (c *Cron) EntriesToFire() []*Entry {
 	log.Info().Msg("cron - entriesToFire - start")
-	c.runningMu.RLock()
-	defer c.runningMu.RUnlock()
+	c.entriesMu.RLock()
+	defer c.entriesMu.RUnlock()
 	var entriesToFire []*Entry
 	for _, e := range c.entries {
 		now := c.now()
@@ -497,8 +531,8 @@ func (c *Cron) EntriesToFire() []*Entry {
 
 func (c *Cron) UpdateNextSchedule(entry *Entry) {
 	log.Info().Msg("cron - update next schedule")
-	c.runningMu.Lock()
-	defer c.runningMu.Unlock()
+	c.entriesMu.Lock()
+	defer c.entriesMu.Unlock()
 	entry.Prev = entry.Next
 	entry.Next = entry.Schedule.Next(entry.Prev)
 	if entry.Next.Before(c.now()) {
@@ -517,8 +551,8 @@ func (c *Cron) SetCustomTime(time time.Time) {
 
 func (c *Cron) UpdateAllNextSchedules() {
 	log.Info().Msg("cron - update all next schedules")
-	c.runningMu.Lock()
-	defer c.runningMu.Unlock()
+	c.entriesMu.Lock()
+	defer c.entriesMu.Unlock()
 	for _, e := range c.entries {
 		e.Next = e.Schedule.Next(c.now())
 		if e.Next.Before(c.now()) {
